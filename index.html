@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Chess Game</title>
+    <link rel="stylesheet" href="chessboard-1.0.0.min.css" />
+    <script src="https://code.jquery.com/jquery-3.4.1.min.js"></script>
+    <script src="chessboard-1.0.0.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/chess.js/0.10.2/chess.min.js"></script>
+    <script src="handlepiece.js"></script>
+    <style>
+
+    </style>
+</head>
+<body>
+    <button id="playAsBlack">Play as Black</button>
+    <button id="playAsWhite">Play as White</button>
+    <button id="playWithStockfish">Play with Stockfish</button>
+    <button  id="newGame">New Game</button>
+    <button  id="undo">Undo</button>
+
+    
+
+    <div id="board" style="width: 550px"></div>
+    <div id="status">Game in Progress</div>
+
+    <script>
+        let stockfish = false ;
+        let playAsBlack = false ;
+
+        // Khởi tạo đối tượng Chess từ chess.js
+        const game = new Chess();
+
+        // Hàm xử lý cập nhật trạng thái
+        function updateStatus() {
+            let status = '';
+
+            if (game.in_checkmate()) {
+                status = 'Checkmate! Game over.';
+            } else if (game.in_draw()) {
+                status = 'Draw!';
+            } else if (game.in_check()) {
+                status = 'Check!';
+            } else {
+                status = `${game.turn() === 'w' ? 'White' : 'Black'} to move.`;
+            }
+
+            $('#status').text(status);
+        } 
+
+        $('#playAsBlack').on('click', () => {
+        board.orientation('black'); // Đặt bàn cờ hướng cho đen
+        //game.reset(); // Khởi động lại game
+        if (stockfish){
+            makeMove("","") ;
+        }
+        updateStatus(); // Cập nhật trạng thái
+        });
+
+        $('#playAsWhite').on('click', () => {
+        board.orientation('white'); // Đặt bàn cờ hướng cho trắng
+        //game.reset(); // Khởi động lại game
+        updateStatus(); // Cập nhật trạng thái
+        });
+
+        $('#playWithStockfish').on('click', () => {
+            stockfish = true ;
+        });
+
+        $('#newGame').on('click', () => {
+            resetGame() ;
+            game.reset(); // Khởi động lại game
+            removePreviousMoveHighlight();
+            board.position(game.fen()); // Đặt lại vị trí quân cờ
+            updateStatus(); // Cập nhật trạng thái
+        });
+        
+        $('#undo').on('click', () => {
+            undoMove();
+            game.undo();
+            removePreviousMoveHighlight();
+            board.position(game.fen());
+            updateStatus();
+        });
+
+
+        // Khởi tạo bàn cờ từ chessboard.js
+        const board = Chessboard('board', {
+            pieceTheme: 'wikipedia/{piece}.png',
+            draggable: true,
+            position: 'start',
+
+            onDragStart: (source, piece) => {
+                removePreviousMoveHighlight()
+
+                highlightValidMoves(source);
+                // Không cho phép di chuyển khi game kết thúc hoặc di chuyển sai màu
+                if (game.game_over() || 
+                    (game.turn() === 'w' && piece.search(/^b/) !== -1) ||
+                    (game.turn() === 'b' && piece.search(/^w/) !== -1)) {
+                    return false;
+                }
+            },
+            onDrop: (source, target) => {
+                
+                window.piece = game.get(source).type; // Lấy loại quân cờ từ vị trí xuất phát
+                if (shouldPromotePawn(game, source, target)) 
+                    promotion = prompt("Phong quân nào? (q/r/n/b)", "q") || 'q'; // Mặc định là hậu
+                // Hiển thị giao diện chọn quân để phong (ví dụ: pop-up hoặc menu)
+                else promotion = 'q'; // Mặc định là hậu
+                
+                // Cố gắng thực hiện nước đi
+                const move = game.move({
+                    from: source,
+                    to: target,
+                    promotion: promotion // Thực hiện nâng cấp quân cờ
+                });
+                highlightPreviousMove(source, target);
+                // Nếu nước đi không hợp lệ, trả về trạng thái cũ
+                if (move === null) {
+                    removePreviousMoveHighlight();
+                    return 'snapback';
+                }
+
+
+                // nếu chơi với stockfish
+                if (stockfish){
+                    makeMove(source, target) ;
+                }
+
+
+                // Cập nhật trạng thái game
+                updateStatus();
+            },
+            onSnapEnd: () => {
+                // Cập nhật giao diện bàn cờ sau khi thực hiện nước đi
+                board.position(game.fen());
+                removeHighlights();
+            }
+        });
+
+        // Cập nhật trạng thái lần đầu
+        updateStatus();
+    </script>
+    <script src="stockfish.js"></script>
+    <script src="undomove.js"></script>
+
+</body>
+</html>
