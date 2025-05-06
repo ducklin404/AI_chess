@@ -36,7 +36,7 @@ def get_ai_move():
         return jsonify({"message": "Stalemate! Game over. The game has been reset.", "fen": board.fen()})
 
     # Sử dụng AI để tính nước đi
-    with chess.engine.SimpleEngine.popen_uci(r"C:\Users\dotha\OneDrive\Desktop\CHESS\stockfish\stockfish") as engine:
+    with chess.engine.SimpleEngine.popen_uci(r"C:\Users\ASUS\Downloads\stockfish-windows-x86-64-avx2(1)\stockfish\stockfish-windows-x86-64-avx2.exe") as engine:
         # Phân tích các nước đi với giới hạn thời gian 1 giây
         info = engine.analyse(board, chess.engine.Limit(time=1.0), multipv=5)  # multipv=5 để lấy top 5 nước đi
 
