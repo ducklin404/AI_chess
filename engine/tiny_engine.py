@@ -1,9 +1,20 @@
 from pre_calculate_moves import *
 from copy import deepcopy                    
+from nnue import NNUE, evaluate_position
+import torch
 
 INF = 10**9
 popcnt = int.bit_count          
 WK, WQ, BK, BQ = 1, 2, 4, 8
+
+# Initialize NNUE model
+nnue_model = NNUE()
+# Load weights if available
+try:
+    nnue_model.load_state_dict(torch.load('nnue_weights.pth'))
+    nnue_model.eval()
+except:
+    print("No NNUE weights found, using untrained model")
 
 class Board:
 
@@ -187,6 +198,14 @@ class Board:
     def make(self, move):
         frm, to, flag = move
         piece = self.piece_at(frm)
+        if piece is None:  # Add safety check
+            return
+
+        # Store captured piece before making the move
+        captured_piece = None
+        if flag in ('x', 'ep'):
+            cap_sq = to if flag == 'x' else (to - 8 if self.side else to + 8)
+            captured_piece = self.piece_at(cap_sq)
 
         # clear previous EP
         self.ep = None
@@ -203,54 +222,75 @@ class Board:
             if frm == 56: self.castle &= ~BQ  
             if frm == 63: self.castle &= ~BK 
 
-        if flag == 'ck':          
+        # Handle captures first (including en passant)
+        if flag in ('x', 'ep'):
+            cap_sq = to if flag == 'x' else (to - 8 if self.side else to + 8)
+            cap_pc = self.piece_at(cap_sq)
+            if cap_pc:
+                # Remove captured piece
+                self.bb[cap_pc] = self.bb[cap_pc] & ~(1 << cap_sq)
+
+        # Handle special moves
+        if flag == 'ck':          # Kingside castling
             if self.side:  # white
-                self.bb['K'] ^= (1<<4) | (1<<6)   
-                self.bb['R'] ^= (1<<7) | (1<<5)  
+                # Move king
+                self.bb['K'] = (self.bb['K'] & ~(1 << 4)) | (1 << 6)
+                # Move rook
+                self.bb['R'] = (self.bb['R'] & ~(1 << 7)) | (1 << 5)
             else:           # black
-                self.bb['k'] ^= (1<<60) | (1<<62)
-                self.bb['r'] ^= (1<<63) | (1<<61)
-        elif flag == 'cq':      
+                # Move king
+                self.bb['k'] = (self.bb['k'] & ~(1 << 60)) | (1 << 62)
+                # Move rook
+                self.bb['r'] = (self.bb['r'] & ~(1 << 63)) | (1 << 61)
+        elif flag == 'cq':      # Queenside castling
             if self.side:
-                self.bb['K'] ^= (1<<4) | (1<<2)   
-                self.bb['R'] ^= (1<<0) | (1<<3)   
+                # Move king
+                self.bb['K'] = (self.bb['K'] & ~(1 << 4)) | (1 << 2)
+                # Move rook
+                self.bb['R'] = (self.bb['R'] & ~(1 << 0)) | (1 << 3)
             else:
-                self.bb['k'] ^= (1<<60) | (1<<58)
-                self.bb['r'] ^= (1<<56) | (1<<59)
+                # Move king
+                self.bb['k'] = (self.bb['k'] & ~(1 << 60)) | (1 << 58)
+                # Move rook
+                self.bb['r'] = (self.bb['r'] & ~(1 << 56)) | (1 << 59)
         else:
-            # pawn double → EP
+            # Handle pawn double push for en passant
             if piece in "Pp" and abs(to - frm) == 16:
                 self.ep = (frm + to) // 2
 
-            # promotions
+            # Handle promotions
             if piece in "Pp" and to // 8 in (0, 7):
                 promo = 'Q' if piece.isupper() else 'q'
-                self.bb[piece] ^= 1 << frm
-                self.bb[promo] |= 1 << to
+                # Remove pawn from old position
+                self.bb[piece] = self.bb[piece] & ~(1 << frm)
+                # Add promoted piece to new position
+                self.bb[promo] = self.bb[promo] | (1 << to)
             else:
-                self.bb[piece] ^= (1 << frm) | (1 << to)
+                # Regular move
+                # Remove piece from old position and add to new position
+                self.bb[piece] = (self.bb[piece] & ~(1 << frm)) | (1 << to)
 
-            # captures (incl. EP)
-            if flag in ('x', 'ep'):
-                cap_sq = to if flag == 'x' else (to - 8 if self.side else to + 8)
-                cap_pc = self.piece_at(cap_sq)
-                if cap_pc:
-                    self.bb[cap_pc] ^= 1 << cap_sq
-
+        # Update castling rights if rook is captured
         if flag == 'x':
             if to == 0:   self.castle &= ~WQ
             if to == 7:   self.castle &= ~WK
             if to == 56:  self.castle &= ~BQ
             if to == 63:  self.castle &= ~BK
 
-        # side to move
+        # Switch side to move
         self.side ^= 1
         self._refresh_occ()
+        
+        # Return captured piece for game state checking
+        return captured_piece
 
 
     def piece_at(self, sq):
-        for p,b in self.bb.items():
-            if b >> sq & 1: return p
+        """Get piece at square, with safety check"""
+        if not 0 <= sq < 64:  # Add bounds check
+            return None
+        for p, b in self.bb.items():
+            if b & (1 << sq): return p
         return None
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -310,12 +350,36 @@ def legal_moves(board: Board):
 # ────────────────────────────────────────────────────────────────────────────
 # 5.  Negamax + αβ
 # ────────────────────────────────────────────────────────────────────────────
+def is_checkmate(board):
+    """Check if the current position is checkmate"""
+    # Check if king is in check
+    ksq = lsb(board.bb['K' if board.side else 'k'])
+    if not board.is_attacked(ksq, by_white=not board.side):
+        return False
+    
+    # Check if any legal moves exist
+    return not any(board.moves())
+
+def is_stalemate(board):
+    """Check if the current position is stalemate"""
+    # Check if king is not in check
+    ksq = lsb(board.bb['K' if board.side else 'k'])
+    if board.is_attacked(ksq, by_white=not board.side):
+        return False
+    
+    # Check if any legal moves exist
+    return not any(board.moves())
+
 def evaluate(board: Board):
-    """Material only (P=100, N/B=300, R=500, Q=900)."""
-    piece_val = dict(P=100,N=300,B=300,R=500,Q=900,
-                     p=-100,n=-300,b=-300,r=-500,q=-900)
-    score = sum(piece_val.get(p,0) * popcnt(bb)
-                for p,bb in board.bb.items())
+    """Evaluate position using NNUE with bonus for king capture"""
+    score = evaluate_position(board, nnue_model)
+    
+    # Add bonus for king capture
+    if not board.bb['K']:  # White king is captured
+        score = -10000  # Black wins
+    elif not board.bb['k']:  # Black king is captured
+        score = 10000   # White wins
+    
     return score if board.side else -score
 
 def negamax(board, depth, alpha, beta):
@@ -353,9 +417,188 @@ def perft(board: Board, depth: int) -> int:
 #     print("depth-3 score:", score)
 #     print("best move   :", best)               # (from, to, flag)
 
+def get_computer_move(board, depth=3):
+    """Get the best move for the computer using negamax search"""
+    score, best_move = negamax(board, depth, -INF, INF)
+    return best_move
+
+def play_computer_move(board):
+    """Make the best move for the computer"""
+    move = get_computer_move(board)
+    if move:
+        board.make(move)
+        return move
+    return None
+
+def print_game_status(board):
+    """Print the current game status"""
+    # Check for king capture
+    if not board.bb['K']:
+        print("\nGame Over! Black wins by capturing the White king!")
+        return True
+    elif not board.bb['k']:
+        print("\nGame Over! White wins by capturing the Black king!")
+        return True
+
+    # Check for checkmate
+    if is_checkmate(board):
+        winner = "Black" if board.side else "White"
+        print(f"\nCheckmate! {winner} wins!")
+        return True
+
+    # Check for stalemate
+    if is_stalemate(board):
+        print("\nStalemate! Game is a draw.")
+        return True
+
+    # Check for insufficient material
+    if is_insufficient_material(board):
+        print("\nDraw by insufficient material!")
+        return True
+
+    # Check for threefold repetition
+    if is_threefold_repetition(board):
+        print("\nDraw by threefold repetition!")
+        return True
+
+    # Check for fifty-move rule
+    if is_fifty_move_rule(board):
+        print("\nDraw by fifty-move rule!")
+        return True
+
+    return False
+
+def is_insufficient_material(board):
+    """Check if there is insufficient material to checkmate"""
+    # Count pieces
+    piece_count = {p: popcnt(bb) for p, bb in board.bb.items()}
+    
+    # King vs King
+    if sum(piece_count.values()) == 2:
+        return True
+        
+    # King and Knight vs King
+    if piece_count['N'] == 1 and piece_count['n'] == 0 and sum(piece_count.values()) == 3:
+        return True
+    if piece_count['n'] == 1 and piece_count['N'] == 0 and sum(piece_count.values()) == 3:
+        return True
+        
+    # King and Bishop vs King
+    if piece_count['B'] == 1 and piece_count['b'] == 0 and sum(piece_count.values()) == 3:
+        return True
+    if piece_count['b'] == 1 and piece_count['B'] == 0 and sum(piece_count.values()) == 3:
+        return True
+        
+    return False
+
+def is_threefold_repetition(board):
+    """Check for threefold repetition"""
+    # This is a simplified version - in a real implementation,
+    # you would need to store the position history
+    return False
+
+def is_fifty_move_rule(board):
+    """Check for fifty-move rule"""
+    # This is a simplified version - in a real implementation,
+    # you would need to track moves since last capture or pawn move
+    return False
+
+def print_board(board):
+    """Print the current board state"""
+    pieces = {0: '.', 1: 'P', 2: 'N', 3: 'B', 4: 'R', 5: 'Q', 6: 'K',
+              7: 'p', 8: 'n', 9: 'b', 10: 'r', 11: 'q', 12: 'k'}
+    
+    print("\n  a b c d e f g h")
+    print("  ---------------")
+    for rank in range(7, -1, -1):
+        print(f"{rank+1}|", end=" ")
+        for file in range(8):
+            sq = rank * 8 + file
+            piece = board.piece_at(sq)
+            if piece:
+                print(piece, end=" ")
+            else:
+                print(".", end=" ")
+        print(f"|{rank+1}")
+    print("  ---------------")
+    print("  a b c d e f g h\n")
+
+def move_to_text(move):
+    """Convert move to algebraic notation"""
+    frm, to, flag = move
+    move_text = f"{FILES[frm%8]}{frm//8+1}{FILES[to%8]}{to//8+1}"
+    
+    # Add special move indicators
+    if flag == 'x':
+        move_text += 'x'
+    elif flag == 'ep':
+        move_text += 'ep'
+    elif flag == 'ck':
+        move_text = 'O-O'
+    elif flag == 'cq':
+        move_text = 'O-O-O'
+    
+    return move_text
+
+def print_move_history(moves):
+    """Print move history in a readable format"""
+    print("\nMove History:")
+    print("-------------")
+    for i, move in enumerate(moves):
+        if i % 2 == 0:
+            print(f"{i//2 + 1}.", end=" ")
+        print(move_to_text(move), end=" ")
+        if i % 2 == 1:
+            print()
+    print("\n-------------")
 
 if __name__ == "__main__":
-    b = Board()
-    for d in range(1, 6):
-        print(f"perft({d}) =", perft(b, d))
+    # Example of playing against computer
+    board = Board()
+    print("Starting new game...")
+    move_history = []
+    
+    while True:
+        print_board(board)
+        print_move_history(move_history)
+        
+        # Check game status
+        if print_game_status(board):
+            break
+        
+        # Player's move
+        try:
+            move_text = input("\nEnter your move (e.g., e2e4) or 'quit' to exit: ")
+            if move_text.lower() == 'quit':
+                break
+                
+            move = parse_move(board, move_text)
+            captured_piece = board.make(move)
+            move_history.append(move)
+            
+            # Check if king was captured
+            if captured_piece in ['K', 'k']:
+                print(f"\nGame Over! {'Black' if board.side else 'White'} wins by capturing the king!")
+                break
+            
+            # Computer's move
+            print("\nComputer is thinking...")
+            comp_move = play_computer_move(board)
+            if comp_move:
+                move_history.append(comp_move)
+                frm, to, flag = comp_move
+                print(f"Computer plays: {move_to_text(comp_move)}")
+                
+                # Check if king was captured
+                captured_piece = board.make(comp_move)
+                if captured_piece in ['K', 'k']:
+                    print(f"\nGame Over! {'Black' if board.side else 'White'} wins by capturing the king!")
+                    break
+            else:
+                print("Game over!")
+                break
+                
+        except Exception as e:
+            print(f"Invalid move: {e}")
+            continue
     
