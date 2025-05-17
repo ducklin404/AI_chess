@@ -1,3 +1,5 @@
 python-chess
 flask
 flask-cors
+torch
+numpy
