@@ -192,6 +192,15 @@ class Board:
             if self.ep is not None and pawn_att[frm] & (1 << self.ep):
                 yield frm, self.ep, 'ep'
 
+    def legal_moves(self):
+        """Generate only legal moves that do not leave king in check"""
+        for mv in self.moves():
+            child = deepcopy(self)
+            child.make(mv)
+            ksq = lsb(child.bb['K' if child.side else 'k'])
+            if not child.is_attacked(ksq, by_white=not child.side):
+                yield mv
+
     # ────────────────────────────────────────────────────────────────────
     # 3.  Make / unmake  
     # ────────────────────────────────────────────────────────────────────
@@ -338,14 +347,8 @@ def parse_move(board: Board, text: str):
     return frm, to, flag
 
 def legal_moves(board: Board):
-    for mv in board.moves():
-        child = Board()          
-        child.__dict__ = board.__dict__.copy()  
-        child.make(mv)
-        # king square after move
-        ksq = lsb(child.bb['K' if child.side else 'k'])
-        if not child.is_attacked(ksq, by_white=not child.side):
-            yield mv
+    """Compatibility wrapper that yields board.legal_moves()."""
+    yield from board.legal_moves()
 
 # ────────────────────────────────────────────────────────────────────────────
 # 5.  Negamax + αβ
@@ -358,7 +361,7 @@ def is_checkmate(board):
         return False
     
     # Check if any legal moves exist
-    return not any(board.moves())
+    return not any(board.legal_moves())
 
 def is_stalemate(board):
     """Check if the current position is stalemate"""
@@ -368,7 +371,7 @@ def is_stalemate(board):
         return False
     
     # Check if any legal moves exist
-    return not any(board.moves())
+    return not any(board.legal_moves())
 
 def evaluate(board: Board):
     """Evaluate position using NNUE with bonus for king capture"""
@@ -386,7 +389,7 @@ def negamax(board, depth, alpha, beta):
     if depth == 0:
         return evaluate(board), None
     best_move = None
-    for mv in board.moves():
+    for mv in board.legal_moves():
         child = deepcopy(board)
         child.make(mv)
         sc, _ = negamax(child, depth-1, -beta, -alpha)
@@ -401,7 +404,7 @@ def perft(board: Board, depth: int) -> int:
     if depth == 0:
         return 1
     nodes = 0
-    for mv in board.moves():
+    for mv in board.legal_moves():
         child = deepcopy(board)
         child.make(mv)
         nodes += perft(child, depth - 1)
